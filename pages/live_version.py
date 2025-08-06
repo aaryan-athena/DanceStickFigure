@@ -8,6 +8,8 @@ from matplotlib.patches import Circle, Polygon
 from matplotlib.lines import Line2D
 from PIL import Image
 import io
+import os
+import tempfile
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
 st.set_page_config(page_title="Show Me The Moves - Live Fingers 🖐️", layout="centered")
@@ -16,7 +18,11 @@ st.title("🎥 Live Stick Figure (with Fingers!)")
 st.write("Turn on your webcam to see a stick figure version of yourself with fingers!")
 st.info("🌐 This now works in deployed versions using WebRTC!")
 
-# MediaPipe setup
+# Check if running in deployed environment
+def is_deployed():
+    return os.getenv("STREAMLIT_SERVER_PORT") is not None or os.getenv("STREAMLIT_SHARING_MODE") is not None
+
+# MediaPipe setup with error handling
 mp_pose = mp.solutions.pose
 mp_hands = mp.solutions.hands
 
@@ -41,46 +47,92 @@ SMOOTHING_ALPHA = 0.4
 
 class StickFigureProcessor(VideoProcessorBase):
     def __init__(self):
-        self.pose = mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=0,  # Reduced from 1 to 0 for better performance
-            smooth_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        self.hands = mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.6,  # Slightly reduced for better performance
-            min_tracking_confidence=0.6
-        )
+        self.pose = None
+        self.hands = None
         self.prev_points = None
         self.frame_count = 0
+        self.init_error = None
+        
+        # Initialize MediaPipe with error handling
+        try:
+            # Set environment variables for MediaPipe
+            os.environ['MEDIAPIPE_DISABLE_GPU'] = '1'
+            
+            # Create temporary directory for MediaPipe models if needed
+            if is_deployed():
+                temp_dir = tempfile.mkdtemp()
+                os.environ['TMPDIR'] = temp_dir
+            
+            self.pose = mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=0,  # Use lightest model
+                smooth_landmarks=True,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            self.hands = mp_hands.Hands(
+                static_image_mode=False,
+                max_num_hands=2,
+                min_detection_confidence=0.6,
+                min_tracking_confidence=0.6
+            )
+        except Exception as e:
+            self.init_error = str(e)
+            st.error(f"MediaPipe initialization failed: {e}")
 
     def recv(self, frame):
-        self.frame_count += 1
+        # Return error frame if initialization failed
+        if self.init_error or not self.pose or not self.hands:
+            return self.create_error_frame(frame)
         
+        try:
+            self.frame_count += 1
+            
+            img = frame.to_ndarray(format="bgr24")
+            img = cv2.flip(img, 1)  # Mirror the image
+            
+            # Resize input for faster processing
+            height, width = img.shape[:2]
+            if width > 640:
+                scale = 640 / width
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                img = cv2.resize(img, (new_width, new_height))
+            
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            # Process with MediaPipe
+            results_pose = self.pose.process(img_rgb)
+            results_hands = self.hands.process(img_rgb)
+            
+            # Create stick figure
+            stick_img = self.create_stick_figure(results_pose, results_hands, img.shape)
+            
+            return av.VideoFrame.from_ndarray(stick_img, format="bgr24")
+            
+        except Exception as e:
+            # Return error frame on processing failure
+            return self.create_error_frame(frame, str(e))
+
+    def create_error_frame(self, frame, error_msg="MediaPipe Error"):
+        """Create a simple error message frame"""
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1)  # Mirror the image
-        
-        # Resize input for faster processing
         height, width = img.shape[:2]
-        if width > 640:
-            scale = 640 / width
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            img = cv2.resize(img, (new_width, new_height))
         
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # Create black frame with error text
+        error_frame = np.zeros((height, width, 3), dtype=np.uint8)
         
-        # Process every frame (removed frame skipping for smoother experience)
-        results_pose = self.pose.process(img_rgb)
-        results_hands = self.hands.process(img_rgb)
+        # Add text
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        text = "Processing Error"
+        text_size = cv2.getTextSize(text, font, 1, 2)[0]
+        text_x = (width - text_size[0]) // 2
+        text_y = height // 2
         
-        # Create stick figure
-        stick_img = self.create_stick_figure(results_pose, results_hands, img.shape)
+        cv2.putText(error_frame, text, (text_x, text_y), font, 1, (255, 255, 255), 2)
+        cv2.putText(error_frame, "Check console for details", (text_x - 50, text_y + 40), font, 0.5, (255, 255, 255), 1)
         
-        return av.VideoFrame.from_ndarray(stick_img, format="bgr24")
+        return error_frame
 
     def create_stick_figure(self, results_pose, results_hands, img_shape):
         # Use smaller figure size for better performance
@@ -208,34 +260,53 @@ class StickFigureProcessor(VideoProcessorBase):
         img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
         return img_bgr
 
-# WebRTC Configuration with multiple STUN/TURN servers for better connectivity
+# Enhanced WebRTC Configuration for better Streamlit Cloud compatibility
 RTC_CONFIGURATION = RTCConfiguration({
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
         {"urls": ["stun:stun1.l.google.com:19302"]},
         {"urls": ["stun:stun2.l.google.com:19302"]},
+        {"urls": ["stun:stun3.l.google.com:19302"]},
+        {"urls": ["stun:stun4.l.google.com:19302"]},
         {"urls": ["stun:stun.relay.metered.ca:80"]},
+        {"urls": ["stun:openrelay.metered.ca:80"]},
         {
             "urls": ["turn:openrelay.metered.ca:80"],
             "username": "openrelayproject",
             "credential": "openrelayproject",
         },
+        {
+            "urls": ["turn:openrelay.metered.ca:443"],
+            "username": "openrelayproject", 
+            "credential": "openrelayproject",
+        },
+        {
+            "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
+            "username": "openrelayproject",
+            "credential": "openrelayproject",
+        },
     ],
-    "iceCandidatePoolSize": 10,
+    "iceCandidatePoolSize": 20,  # Increased for better connectivity
 })
 
-# Optimized media constraints for better performance
+# Conservative media constraints for Streamlit Cloud
 MEDIA_STREAM_CONSTRAINTS = {
     "video": {
-        "width": {"min": 320, "ideal": 640, "max": 1280},
-        "height": {"min": 240, "ideal": 480, "max": 720},
-        "frameRate": {"min": 10, "ideal": 15, "max": 30},
+        "width": {"min": 320, "ideal": 480, "max": 640},  # Lower ideal resolution
+        "height": {"min": 240, "ideal": 360, "max": 480},
+        "frameRate": {"min": 5, "ideal": 10, "max": 15},  # Lower frame rate
     },
     "audio": False
 }
 
 st.markdown("### 🎥 Live Camera Feed & Stick Figure")
-st.warning("⚠️ **Network Tips**: If connection fails, try refreshing the page or check your internet connection.")
+
+# Add deployment-specific warnings
+if is_deployed():
+    st.warning("⚠️ **Running on Streamlit Cloud**: Connection may take 30-60 seconds. Please be patient!")
+    st.info("💡 **If connection fails**: Try refreshing the page or use a different browser")
+else:
+    st.warning("⚠️ **Network Tips**: If connection fails, try refreshing the page or check your internet connection.")
 
 # Create two columns for side-by-side display
 col1, col2 = st.columns(2)
@@ -266,6 +337,11 @@ with col2:
     except Exception as e:
         st.error(f"Stick figure processing failed: {str(e)}")
         st.info("💡 Try refreshing the page or using a different browser (Chrome/Firefox recommended)")
+        
+        # Show detailed error for debugging
+        if is_deployed():
+            st.error(f"**Debug Info**: {str(e)}")
+            st.info("This may be a MediaPipe model access issue on the server.")
 
 st.markdown("---")
 st.markdown("### 🎯 Features:")
