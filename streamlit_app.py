@@ -12,6 +12,29 @@ import os
 import time
 from typing import List, Tuple, Optional
 
+# Check deployment environment
+def check_deployment_environment():
+    """Check if running in a deployment environment and show info"""
+    if os.path.exists('/home/adminuser') or os.path.exists('/app'):
+        st.info("🌐 Running in deployment environment - optimized for cloud hosting")
+        return True
+    return False
+
+def check_mediapipe_version():
+    """Check MediaPipe version compatibility"""
+    try:
+        mp_version = mp.__version__
+        st.sidebar.info(f"📦 MediaPipe version: {mp_version}")
+        
+        # Check for known problematic versions
+        if mp_version.startswith('0.10'):
+            st.sidebar.warning("⚠️ MediaPipe 0.10.x may have deployment issues. Consider updating.")
+    except:
+        pass
+
+IS_DEPLOYED = check_deployment_environment()
+check_mediapipe_version()
+
 # Optimized configuration
 st.set_page_config(page_title="Show Me The Moves 💃🕺", layout="centered")
 st.title("💃🕺 Show Me The Moves")
@@ -21,15 +44,49 @@ st.markdown("**⚡ Lightweight & Fast** - Upload a video and get your stick figu
 # Initialize MediaPipe with optimized settings
 @st.cache_resource
 def init_mediapipe():
-    """Initialize MediaPipe with optimized settings for performance"""
-    mp_pose = mp.solutions.pose
-    return mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=0,  # Lightest model for speed
-        enable_segmentation=False,  # Disable segmentation for speed
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
+    """Initialize MediaPipe with optimized settings for performance and deployment compatibility"""
+    try:
+        mp_pose = mp.solutions.pose
+        
+        # Different settings for deployment vs local
+        if IS_DEPLOYED:
+            # Deployment-optimized settings
+            pose = mp_pose.Pose(
+                static_image_mode=True,  # Static mode works better in deployment
+                model_complexity=1,  # Middle complexity for stability
+                enable_segmentation=False,
+                min_detection_confidence=0.3,
+                min_tracking_confidence=0.3
+            )
+            st.success("✅ MediaPipe initialized for deployment environment")
+        else:
+            # Local development settings
+            pose = mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=0,  # Lightest model for speed
+                enable_segmentation=False,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            st.success("✅ MediaPipe initialized for local environment")
+        
+        return pose
+        
+    except Exception as e:
+        st.warning(f"⚠️ MediaPipe initialization issue: {str(e)}")
+        st.info("🔄 Trying fallback MediaPipe configuration...")
+        
+        try:
+            # Fallback configuration
+            mp_pose = mp.solutions.pose
+            pose = mp_pose.Pose()  # Use default settings
+            st.info("✅ MediaPipe initialized with default settings")
+            return pose
+            
+        except Exception as e2:
+            st.error(f"❌ Failed to initialize MediaPipe: {str(e2)}")
+            st.error("💡 This might be a deployment environment issue. Try using a different hosting platform or run locally.")
+            return None
 
 # Pose connection pairs for stick figure
 POSE_PAIRS = [
@@ -122,6 +179,12 @@ def create_stick_figure(pose_landmarks, width: int = 1280, height: int = 720) ->
 def process_video_optimized(video_path: str) -> Tuple[List[np.ndarray], List[Image.Image]]:
     """Process video with optimized pipeline - no intermediate files"""
     pose = init_mediapipe()
+    
+    # Check if MediaPipe initialization failed
+    if pose is None:
+        st.error("❌ MediaPipe initialization failed. Cannot process video.")
+        return [], []
+    
     cap = cv2.VideoCapture(video_path)
     
     if not cap.isOpened():
@@ -159,20 +222,26 @@ def process_video_optimized(video_path: str) -> Tuple[List[np.ndarray], List[Ima
         progress = frame_count / total_frames
         progress_bar.progress(progress)
         
-        # Process frame
-        frame = cv2.flip(frame, 1)  # Mirror effect
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # MediaPipe pose detection
-        results = pose.process(frame_rgb)
-        
-        # Create stick figure
-        stick_figure = create_stick_figure(results.pose_landmarks)
-        
-        # Store results
-        original_frames.append(frame_rgb)
-        stick_figures.append(stick_figure)
-        processed_count += 1
+        # Process frame with error handling
+        try:
+            frame = cv2.flip(frame, 1)  # Mirror effect
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # MediaPipe pose detection with error handling
+            results = pose.process(frame_rgb)
+            
+            # Create stick figure
+            stick_figure = create_stick_figure(results.pose_landmarks)
+            
+            # Store results
+            original_frames.append(frame_rgb)
+            stick_figures.append(stick_figure)
+            processed_count += 1
+            
+        except Exception as frame_error:
+            st.warning(f"⚠️ Error processing frame {frame_count}: {str(frame_error)}")
+            # Skip this frame and continue
+            continue
     
     cap.release()
     progress_bar.progress(1.0)
@@ -226,30 +295,40 @@ if uploaded_file is not None:
     if st.button("🎭 Create Stick Figure Animation", type="primary"):
         with st.spinner("Processing video... This may take a moment"):
             try:
-                # Process video
-                original_frames, stick_figures = process_video_optimized(temp_video_path)
-                
-                if original_frames and stick_figures:
-                    st.success("✅ Video processed successfully!")
-                    
-                    # Store in session state for display
-                    st.session_state.original_frames = original_frames
-                    st.session_state.stick_figures = stick_figures
-                    st.session_state.current_frame = 0
-                    
-                    # Create downloadable video
-                    output_path = tempfile.mktemp(suffix='.mp4')
-                    if create_video_from_frames(stick_figures, output_path):
-                        with open(output_path, 'rb') as f:
-                            st.download_button(
-                                label="📥 Download Stick Figure Video",
-                                data=f.read(),
-                                file_name=f"stick_figure_{uploaded_file.name}",
-                                mime="video/mp4"
-                            )
-                        os.unlink(output_path)
+                # Check MediaPipe availability first
+                test_pose = init_mediapipe()
+                if test_pose is None:
+                    st.error("❌ MediaPipe is not available in this environment")
+                    st.info("💡 **Deployment Issue**: This appears to be a hosting platform limitation.")
+                    st.info("🔧 **Solutions:**")
+                    st.info("- Try a different hosting platform (Heroku, Railway, etc.)")
+                    st.info("- Run the app locally with: `streamlit run streamlit_app.py`")
+                    st.info("- Use the optimized_app.py version which may be more compatible")
                 else:
-                    st.error("❌ Failed to process video")
+                    # Process video
+                    original_frames, stick_figures = process_video_optimized(temp_video_path)
+                    
+                    if original_frames and stick_figures:
+                        st.success("✅ Video processed successfully!")
+                        
+                        # Store in session state for display
+                        st.session_state.original_frames = original_frames
+                        st.session_state.stick_figures = stick_figures
+                        st.session_state.current_frame = 0
+                        
+                        # Create downloadable video
+                        output_path = tempfile.mktemp(suffix='.mp4')
+                        if create_video_from_frames(stick_figures, output_path):
+                            with open(output_path, 'rb') as f:
+                                st.download_button(
+                                    label="📥 Download Stick Figure Video",
+                                    data=f.read(),
+                                    file_name=f"stick_figure_{uploaded_file.name}",
+                                    mime="video/mp4"
+                                )
+                            os.unlink(output_path)
+                    else:
+                        st.error("❌ Failed to process video")
                     
             except Exception as e:
                 st.error(f"❌ Error processing video: {str(e)}")
