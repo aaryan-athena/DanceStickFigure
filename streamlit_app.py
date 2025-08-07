@@ -14,26 +14,12 @@ from typing import List, Tuple, Optional
 
 # Check deployment environment
 def check_deployment_environment():
-    """Check if running in a deployment environment and show info"""
+    """Check if running in a deployment environment"""
     if os.path.exists('/home/adminuser') or os.path.exists('/app'):
-        st.info("🌐 Running in deployment environment - optimized for cloud hosting")
         return True
     return False
 
-def check_mediapipe_version():
-    """Check MediaPipe version compatibility"""
-    try:
-        mp_version = mp.__version__
-        st.sidebar.info(f"📦 MediaPipe version: {mp_version}")
-        
-        # Check for known problematic versions
-        if mp_version.startswith('0.10'):
-            st.sidebar.warning("⚠️ MediaPipe 0.10.x may have deployment issues. Consider updating.")
-    except:
-        pass
-
 IS_DEPLOYED = check_deployment_environment()
-check_mediapipe_version()
 
 # Optimized configuration
 st.set_page_config(page_title="Show Me The Moves 💃🕺", layout="centered")
@@ -58,7 +44,6 @@ def init_mediapipe():
                 min_detection_confidence=0.3,
                 min_tracking_confidence=0.3
             )
-            st.success("✅ MediaPipe initialized for deployment environment")
         else:
             # Local development settings
             pose = mp_pose.Pose(
@@ -68,7 +53,6 @@ def init_mediapipe():
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5
             )
-            st.success("✅ MediaPipe initialized for local environment")
         
         return pose
         
@@ -80,7 +64,6 @@ def init_mediapipe():
             # Fallback configuration
             mp_pose = mp.solutions.pose
             pose = mp_pose.Pose()  # Use default settings
-            st.info("✅ MediaPipe initialized with default settings")
             return pose
             
         except Exception as e2:
@@ -315,18 +298,6 @@ if uploaded_file is not None:
                         st.session_state.original_frames = original_frames
                         st.session_state.stick_figures = stick_figures
                         st.session_state.current_frame = 0
-                        
-                        # Create downloadable video
-                        output_path = tempfile.mktemp(suffix='.mp4')
-                        if create_video_from_frames(stick_figures, output_path):
-                            with open(output_path, 'rb') as f:
-                                st.download_button(
-                                    label="📥 Download Stick Figure Video",
-                                    data=f.read(),
-                                    file_name=f"stick_figure_{uploaded_file.name}",
-                                    mime="video/mp4"
-                                )
-                            os.unlink(output_path)
                     else:
                         st.error("❌ Failed to process video")
                     
@@ -346,6 +317,23 @@ if 'original_frames' in st.session_state and 'stick_figures' in st.session_state
     
     original_frames = st.session_state.original_frames
     stick_figures = st.session_state.stick_figures
+    
+    # Download button always visible when results are available
+    if stick_figures:
+        output_path = tempfile.mktemp(suffix='.mp4')
+        if create_video_from_frames(stick_figures, output_path):
+            with open(output_path, 'rb') as f:
+                st.download_button(
+                    label="📥 Download Stick Figure Video",
+                    data=f.read(),
+                    file_name=f"stick_figure_animation.mp4",
+                    mime="video/mp4",
+                    key="download_video"
+                )
+            try:
+                os.unlink(output_path)
+            except:
+                pass
     
     if original_frames:
         total_frames = len(original_frames)
@@ -395,18 +383,55 @@ if 'original_frames' in st.session_state and 'stick_figures' in st.session_state
                 st.rerun()
         
         # Auto-play option
-        if st.checkbox("🔄 Auto-play animation"):
-            if st.button("▶️ Start Auto-play"):
-                placeholder = st.empty()
-                for i in range(total_frames):
-                    with placeholder.container():
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.image(original_frames[i], caption=f"Original Frame {i+1}")
-                        with col2:
-                            st.image(stick_figures[i], caption=f"Stick Figure {i+1}")
-                    st.session_state.current_frame = i
-                    time.sleep(0.2)  # Adjust speed
+        st.markdown("#### 🔄 Auto-play Animation")
+        col1, col2, col3 = st.columns([1, 1, 1])
+        
+        with col1:
+            if st.button("▶️ Start Auto-play", use_container_width=True):
+                st.session_state.autoplay_active = True
+                st.session_state.autoplay_frame = 0
+        
+        with col2:
+            if st.button("⏹️ Stop Auto-play", use_container_width=True):
+                st.session_state.autoplay_active = False
+        
+        with col3:
+            if st.button("🔄 Reset Auto-play", use_container_width=True):
+                st.session_state.autoplay_frame = 0
+                st.session_state.current_frame = 0
+        
+        # Auto-play execution
+        if st.session_state.get('autoplay_active', False):
+            frame_index = st.session_state.get('autoplay_frame', 0)
+            
+            if frame_index < total_frames:
+                # Create auto-play display
+                autoplay_container = st.container()
+                with autoplay_container:
+                    st.markdown(f"**🎬 Auto-playing: Frame {frame_index + 1} of {total_frames}**")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("**📷 Original**")
+                        st.image(original_frames[frame_index], use_container_width=True)
+                    with col2:
+                        st.markdown("**🎭 Stick Figure**")
+                        st.image(stick_figures[frame_index], use_container_width=True)
+                
+                # Update frame and continue
+                st.session_state.autoplay_frame = frame_index + 1
+                st.session_state.current_frame = frame_index
+                
+                # Auto-advance with different timing for deployment
+                if IS_DEPLOYED:
+                    time.sleep(0.3)  # Slower for deployment stability
+                else:
+                    time.sleep(0.2)  # Faster for local
+                
+                st.rerun()
+            else:
+                # Auto-play completed
+                st.session_state.autoplay_active = False
+                st.success("🎉 Auto-play completed!")
         
         # Clear results
         if st.button("🗑️ Clear Results"):
